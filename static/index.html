@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Websocket Drawing</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <!-- Join Modal -->
+    <div class="join-modal" id="joinModal">
+        <div class="modal-content">
+            <div class="modal-title">Join Drawboard</div>
+            <div class="modal-subtitle">Collaborate in real-time with others</div>
+            <div class="input-group">
+                <label>Your Name</label>
+                <input type="text" id="userName" placeholder="Enter your name" maxlength="20">
+            </div>
+            <div class="input-group">
+                <label>Room ID</label>
+                <input type="text" id="roomId" placeholder="Enter room ID or leave empty for new room">
+            </div>
+            <button class="join-btn" id="joinBtn">Join Room</button>
+        </div>
+    </div>
+
+    <header class="header">
+        <div class="logo">
+            <div class="logo-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" width="16" height="16">
+                    <path d="M12 19l7-7 3 3-7 7-3-3z"/>
+                    <path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/>
+                    <path d="M2 2l7.586 7.586"/>
+                </svg>
+            </div>
+            <span>Drawboard</span>
+        </div>
+        <div class="room-info">
+            <div class="room-badge">Room: <span id="currentRoom">-</span></div>
+            <div class="users-list" id="usersList"></div>
+        </div>
+    </header>
+
+    <div class="main-container">
+        <div class="toolbar">
+            <button class="tool-btn active" data-tool="pen" title="Pen">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M12 19l7-7 3 3-7 7-3-3z"/>
+                    <path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/>
+                </svg>
+            </button>
+            <button class="tool-btn" data-tool="eraser" title="Eraser">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M20 20H7L3 16c-.6-.6-.6-1.5 0-2.1l10-10c.6-.6 1.5-.6 2.1 0l6 6c.6.6.6 1.5 0 2.1L13 20"/>
+                    <path d="M6 12l5 5"/>
+                </svg>
+            </button>
+            
+            <div class="divider"></div>
+            
+            <div class="color-picker-wrapper">
+                <button class="color-btn active" data-color="#e6edf3" style="background: #e6edf3"></button>
+                <button class="color-btn" data-color="#f85149" style="background: #f85149"></button>
+                <button class="color-btn" data-color="#58a6ff" style="background: #58a6ff"></button>
+                <button class="color-btn" data-color="#3fb950" style="background: #3fb950"></button>
+                <button class="color-btn" data-color="#d29922" style="background: #d29922"></button>
+                <button class="color-btn" data-color="#a371f7" style="background: #a371f7"></button>
+            </div>
+
+            <div class="divider"></div>
+
+            <div class="stroke-width">
+                <button class="stroke-btn" data-width="2" title="Thin">
+                    <span style="width: 12px; height: 2px;"></span>
+                </button>
+                <button class="stroke-btn active" data-width="4" title="Medium">
+                    <span style="width: 12px; height: 4px;"></span>
+                </button>
+                <button class="stroke-btn" data-width="8" title="Thick">
+                    <span style="width: 12px; height: 8px;"></span>
+                </button>
+            </div>
+
+            <div class="divider"></div>
+
+            <button class="tool-btn" id="clearBtn" title="Clear Canvas" style="color: var(--danger);">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M3 6h18"/>
+                    <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/>
+                    <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>
+                </svg>
+            </button>
+        </div>
+
+        <div class="canvas-container">
+            <canvas id="canvas"></canvas>
+            <div class="cursors-layer" id="cursorsLayer"></div>
+        </div>
+    </div>
+
+    <div class="status-bar">
+        <div class="status-indicator">
+            <div class="status-dot" id="statusDot"></div>
+            <span id="statusText">Disconnected</span>
+        </div>
+        <div id="coordsDisplay">0, 0</div>
+    </div>
+
+    <script>
+        // State variables - tracks the user data.
+        let ws = null;
+        let userId = '';
+        let userColor = '';
+        let roomId = '';
+        let isConnected = false;
+        let currentTool = 'pen';
+        let currentColor = '#e6edf3';
+        let strokeWidth = 4;
+        let isDrawing = false;
+        let lastX = 0;
+        let lastY = 0;
+        let elementId = 0;
+        const remoteCursors = new Map();
+        
+        // Throttling for cursor updates
+        let lastCursorSend = 0;
+        const CURSOR_THROTTLE_MS = 50;
+        
+        // Batch drawing segments
+        let pendingSegments = [];
+        let sendTimer = null;
+        const SEND_INTERVAL_MS = 16; // ~60fps
+
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const joinModal = document.getElementById('joinModal');
+        const cursorsLayer = document.getElementById('cursorsLayer');
+
+        // Initcanvas
+        function initCanvas() {
+            const container = canvas.parentElement;
+            canvas.width = container.clientWidth;
+            canvas.height = container.clientHeight;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+        }
+
+        window.addEventListener('resize', initCanvas);
+        initCanvas();
+
+        // Check URL for room ID
+        const pathParts = window.location.pathname.split('/');
+        if (pathParts[1] === 'room' && pathParts[2]) {
+            document.getElementById('roomId').value = pathParts[2];
+        }
+
+        // Join popup
+        document.getElementById('joinBtn').addEventListener('click', joinRoom);
+        document.getElementById('userName').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') joinRoom();
+        });
+        document.getElementById('roomId').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') joinRoom();
+        });
+
+        function generateId() {
+            return Math.random().toString(36).substring(2, 10);
+        }
+
+        function joinRoom() {
+            const name = document.getElementById('userName').value.trim() || 'User';
+            roomId = document.getElementById('roomId').value.trim() || generateId();
+            userId = name + '_' + generateId();
+
+            // Update URL
+            history.pushState(null, '', '/room/' + roomId);
+            document.getElementById('currentRoom').textContent = roomId;
+
+            joinModal.classList.add('hidden');
+            connectWebSocket();
+        }
+
+        function connectWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${protocol}//${window.location.host}/ws/${roomId}?userId=${userId}`);
+
+            ws.onopen = () => {
+                isConnected = true;
+                updateStatus(true);
+            };
+
+            ws.onclose = () => {
+                isConnected = false;
+                updateStatus(false);
+                // Attempt reconnect after 3 seconds
+                setTimeout(connectWebSocket, 3000);
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+            };
+
+            ws.onmessage = (event) => {
+                const msg = JSON.parse(event.data);
+                handleMessage(msg);
+            };
+        }
+
+        function handleMessage(msg) {
+            switch (msg.type) {
+                case 'sync':
+                    // Initial sync - draw all existing elements
+                    userId = msg.data.userId;
+                    userColor = msg.data.color;
+                    if (msg.data.elements) {
+                        msg.data.elements.forEach(drawElement);
+                    }
+                    break;
+
+                case 'draw':
+                    drawElement(msg.data);
+                    break;
+
+                case 'cursor':
+                    updateRemoteCursor(msg.userId, msg.data);
+                    break;
+
+                case 'clear':
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+                    break;
+
+                case 'userlist':
+                    updateUsersList(msg.data);
+                    break;
+
+                case 'join':
+                    // Could show a toast notification
+                    break;
+
+                case 'leave':
+                    removeRemoteCursor(msg.userId);
+                    break;
+            }
+        }
+
+        function drawElement(element) {
+            if (!element) return;
+            
+            ctx.beginPath();
+            ctx.strokeStyle = element.strokeColor || currentColor;
+            ctx.lineWidth = element.strokeWidth || strokeWidth;
+            ctx.moveTo(element.x1, element.y1);
+            ctx.lineTo(element.x2, element.y2);
+            ctx.stroke();
+        }
+
+        function updateStatus(connected) {
+            const dot = document.getElementById('statusDot');
+            const text = document.getElementById('statusText');
+            if (connected) {
+                dot.classList.add('connected');
+                text.textContent = 'Connected';
+            } else {
+                dot.classList.remove('connected');
+                text.textContent = 'Reconnecting...';
+            }
+        }
+
+        function updateUsersList(users) {
+            const container = document.getElementById('usersList');
+            container.innerHTML = '';
+            users.forEach((user, i) => {
+                const avatar = document.createElement('div');
+                avatar.className = 'user-avatar';
+                avatar.style.backgroundColor = user.color;
+                avatar.style.zIndex = users.length - i;
+                avatar.textContent = user.id.charAt(0).toUpperCase();
+                avatar.title = user.id.split('_')[0];
+                container.appendChild(avatar);
+            });
+        }
+
+        function updateRemoteCursor(id, data) {
+            if (id === userId) return;
+
+            let cursor = remoteCursors.get(id);
+            if (!cursor) {
+                cursor = document.createElement('div');
+                cursor.className = 'remote-cursor';
+                cursor.innerHTML = `
+                    <div class="cursor-pointer"></div>
+                    <div class="cursor-label">${id.split('_')[0]}</div>
+                `;
+                cursorsLayer.appendChild(cursor);
+                remoteCursors.set(id, cursor);
+            }
+
+            const color = data.color || '#58a6ff';
+            cursor.style.left = data.x + 'px';
+            cursor.style.top = data.y + 'px';
+            cursor.style.color = color;
+            cursor.querySelector('.cursor-label').style.backgroundColor = color;
+        }
+
+        function removeRemoteCursor(id) {
+            const cursor = remoteCursors.get(id);
+            if (cursor) {
+                cursor.remove();
+                remoteCursors.delete(id);
+            }
+        }
+
+        // Tool selection
+        document.querySelectorAll('.tool-btn[data-tool]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.tool-btn[data-tool]').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                currentTool = btn.dataset.tool;
+            });
+        });
+
+        // Color selection
+        document.querySelectorAll('.color-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.color-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                currentColor = btn.dataset.color;
+            });
+        });
+
+        // Stroke width selection
+        document.querySelectorAll('.stroke-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.stroke-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                strokeWidth = parseInt(btn.dataset.width);
+            });
+        });
+
+        // Clear button
+        document.getElementById('clearBtn').addEventListener('click', () => {
+            if (confirm('Clear the entire canvas?')) {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'clear' }));
+                }
+            }
+        });
+
+        // Canvas drawing
+        function getCanvasCoords(e) {
+            const rect = canvas.getBoundingClientRect();
+            return {
+                x: e.clientX - rect.left,
+                y: e.clientY - rect.top
+            };
+        }
+
+        canvas.addEventListener('mousedown', (e) => {
+            isDrawing = true;
+            const coords = getCanvasCoords(e);
+            lastX = coords.x;
+            lastY = coords.y;
+        });
+
+        // Flush pending draw segments to server
+        function flushPendingSegments() {
+            if (pendingSegments.length === 0 || !ws || ws.readyState !== WebSocket.OPEN) return;
+            
+            // Send all pending segments
+            pendingSegments.forEach(segment => {
+                ws.send(JSON.stringify({ type: 'draw', data: segment }));
+            });
+            pendingSegments = [];
+        }
+
+        canvas.addEventListener('mousemove', (e) => {
+            const coords = getCanvasCoords(e);
+            
+            // Update coords display
+            document.getElementById('coordsDisplay').textContent = 
+                `${Math.round(coords.x)}, ${Math.round(coords.y)}`;
+
+            // Throttled cursor position
+            const now = Date.now();
+            if (ws && ws.readyState === WebSocket.OPEN && now - lastCursorSend > CURSOR_THROTTLE_MS) {
+                lastCursorSend = now;
+                ws.send(JSON.stringify({
+                    type: 'cursor',
+                    data: { x: coords.x, y: coords.y, color: userColor }
+                }));
+            }
+
+            if (!isDrawing) return;
+
+            const x = coords.x;
+            const y = coords.y;
+            
+            const color = currentTool === 'eraser' ? '#0d1117' : currentColor;
+            const width = currentTool === 'eraser' ? strokeWidth * 3 : strokeWidth;
+
+            // Draw locally immediately for responsiveness
+            ctx.beginPath();
+            ctx.strokeStyle = color;
+            ctx.lineWidth = width;
+            ctx.moveTo(lastX, lastY);
+            ctx.lineTo(x, y);
+            ctx.stroke();
+
+            // Queue segment for batched sending
+            const element = {
+                id: `${userId}_${elementId++}`,
+                elementType: 'line',
+                x1: lastX,
+                y1: lastY,
+                x2: x,
+                y2: y,
+                strokeColor: color,
+                strokeWidth: width
+            };
+            pendingSegments.push(element);
+            
+            // Schedule batch send
+            if (!sendTimer) {
+                sendTimer = setTimeout(() => {
+                    flushPendingSegments();
+                    sendTimer = null;
+                }, SEND_INTERVAL_MS);
+            }
+
+            lastX = x;
+            lastY = y;
+        });
+
+        canvas.addEventListener('mouseup', () => {
+            isDrawing = false;
+            flushPendingSegments(); // Send remaining segments immediately
+        });
+
+        canvas.addEventListener('mouseleave', () => {
+            isDrawing = false;
+            flushPendingSegments();
+        });
+
+        // Touch support
+        canvas.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            const touch = e.touches[0];
+            const mouseEvent = new MouseEvent('mousedown', {
+                clientX: touch.clientX,
+                clientY: touch.clientY
+            });
+            canvas.dispatchEvent(mouseEvent);
+        });
+
+        canvas.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            const touch = e.touches[0];
+            const mouseEvent = new MouseEvent('mousemove', {
+                clientX: touch.clientX,
+                clientY: touch.clientY
+            });
+            canvas.dispatchEvent(mouseEvent);
+        });
+
+        canvas.addEventListener('touchend', (e) => {
+            e.preventDefault();
+            canvas.dispatchEvent(new MouseEvent('mouseup'));
+            flushPendingSegments();
+        });
+    </script>
+</body>
+</html>
